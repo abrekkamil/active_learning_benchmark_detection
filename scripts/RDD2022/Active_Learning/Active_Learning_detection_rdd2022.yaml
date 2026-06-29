@@ -1,0 +1,43 @@
+experiment_name: "AL_RDD2022_FasterRCNN"
+
+dataset: "RDD2022"
+dataset_type: "rdd2022_detection"
+data_dir: "/home3/vzcl68/Datasets/RDD2022"
+
+num_classes: 5
+rdd_classes: ["D00", "D10", "D20", "D40"]
+val_fraction: 0.15
+
+task: "detection"
+model_name: "fasterrcnn"
+pretrained: true
+reward_metric: "bbox_AP50"
+
+initial_labeled: 0.05
+query_size: 1000
+al_cycles: 10
+initial_training_epoch: 5
+epochs_per_cycle: 3
+
+skip_cold_start: false
+cold_start_strategy: "random"
+query_strategy: "uncertainty"
+pool: false
+use_rl: false
+
+use_cuda: true
+batch_size: 2
+lr: 0.005
+momentum: 0.9
+weight_decay: 0.0005
+num_workers: 4
+
+eval_score_threshold: 0.001
+
+seed: 42
+use_wandb: false
+wandb_project: "AL_benchmark"
+print_freq: 100
+
+checkpoint_dir: "results/checkpoints"
+results_dir: "../results/"

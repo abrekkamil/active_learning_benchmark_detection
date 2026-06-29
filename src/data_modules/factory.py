@@ -1,0 +1,66 @@
+def load_dataset(config, split):
+    if config.dataset_type == "deepcrack":
+        from .deepcrack import DeepCrackSegmentationDataset
+        return DeepCrackSegmentationDataset(
+            config.data_dir, split, config.img_size
+        )
+
+    if config.dataset_type == "coco_instance":
+        from .coco_instance import CocoInstanceSegmentationDataset
+        return CocoInstanceSegmentationDataset(
+            config.data_dir, split, is_train=True
+        )
+
+    if config.dataset_type == "coco_segmentation":
+        from .coco_segmentation import CocoSemanticSegmentationDataset
+        return CocoSemanticSegmentationDataset(
+            config.data_dir, split, config.img_size
+        )
+    if config.dataset_type == "crackseg9k":
+        from .CrackSeg9K import CrackSeg9KDataset
+        return CrackSeg9KDataset(
+            config.data_dir, split, img_size=config.img_size
+        )
+    if config.dataset_type == "sewerml":
+        print(f"Loading Sewerml dataset with split: {split}")
+        from .sewerml import MultiLabelDataset
+        if split == 'val':
+            split = 'valid' # Sewerml only has Train and Test splits, so we use Test for validation
+        return MultiLabelDataset(
+            args=config,
+            img_dir=config.data_dir,
+            labels_path=config.data_dir,
+            testing=False,
+            split= split
+        )
+    if config.dataset_type == "yolo_segmentation":
+        from .yolo_instance_segmentation import YoloInstanceSegmentationDataset
+        return YoloInstanceSegmentationDataset(
+            config.data_dir, split, config.img_size
+        )
+
+    if config.dataset_type == "structdamage":
+        from .folder_classification import FolderClassificationDataset
+        return FolderClassificationDataset(
+            args=config,
+            data_dir=config.data_dir,
+            split=split,
+            label_mode=getattr(config, "label_mode", "folder"),
+        )
+
+    if config.dataset_type == "sdnet2018":
+        from .folder_classification import FolderClassificationDataset
+        return FolderClassificationDataset(
+            args=config,
+            data_dir=config.data_dir,
+            split=split,
+            label_mode=getattr(config, "label_mode", "sdnet_binary"),
+        )
+    if config.dataset_type in ("rdd2022_detection", "rdd2022", "voc_detection"):
+        from .rdd_detection import RDDDetectionDataset
+        return RDDDetectionDataset(
+            args=config,
+            data_dir=config.data_dir,
+            split=split,
+        )
+    raise ValueError(f"Unknown dataset type: {config.dataset_type}")

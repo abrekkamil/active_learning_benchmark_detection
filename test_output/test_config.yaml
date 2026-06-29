@@ -1,0 +1,24 @@
+al_cycles: 5
+checkpoint_dir: results/checkpoints
+cold_start_strategy: random
+data_dir: /path/to/dataset
+dataset: coco
+dataset_name: experiment_1
+epochs_per_cycle: 15
+initial_labeled: 0.1
+initial_training_epoch: 3
+lr: 0.00125
+lr_steps:
+- 30
+- 50
+momentum: 0.9
+num_workers: 4
+print_freq: 100
+query_size: 5
+query_strategy: uncertainty
+results_dir: results
+seed: 42
+use_cuda: true
+use_wandb: true
+wandb_project: AL_benchmark
+weight_decay: 0.0001

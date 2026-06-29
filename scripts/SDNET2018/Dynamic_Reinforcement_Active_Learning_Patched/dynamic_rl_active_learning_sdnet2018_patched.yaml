@@ -1,0 +1,53 @@
+experiment_name: "Dynamic_RAL_SDNET2018"
+
+dataset: "SDNET2018"
+dataset_type: "sdnet2018"
+data_dir: "/home3/vzcl68/Datasets/SDNET2018"
+
+num_classes: 2
+img_size: 224
+scale_size: 224
+label_mode: "sdnet_binary"
+val_fraction: 0.15
+pool_fraction: 0.0
+
+task: "binary_classification"
+model_name: "resnet50_classification"
+pretrained: true
+
+# AL setup (init_labeled / query_size / cold_start are set in Python)
+query_strategy: "rl_policy"
+skip_cold_start: false
+pool: false
+
+# RL setup
+use_rl: true
+policy_lr: 0.0003
+policy_hidden: 256
+entropy_beta: 0.005
+policy_temp: 1.0
+policy_temp_start: 1.5
+policy_temp_end: 0.7
+candidate_ratio: 0.4
+
+# Dynamic budget (NEW patched keys — defaults match your current best run)
+dynamic_query_size: true
+budget_mode: "continuous"
+budget_ratio_min: 0.01
+budget_ratio_max: 0.15
+cost_denom_mode: "total"
+
+# Training
+use_cuda: true
+batch_size: 32
+lr: 0.0001
+weight_decay: 0.0001
+num_workers: 4
+
+# Logging
+seed: 42
+use_wandb: false
+wandb_project: "Dynamic_RAL_benchmark"
+print_freq: 100
+checkpoint_dir: "results/checkpoints"
+results_dir: "../results/"

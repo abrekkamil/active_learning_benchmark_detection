@@ -1,0 +1,40 @@
+{
+    "dataset_size": "7332",
+    "full_results": {
+        "CrackSeg9k": {
+            "unet": {
+                "f1": 0.6392053662098524,
+                "dice": 0.477891651127672,
+                "iou": 0.3630287707906302
+            }
+        },
+        "DeepCrack": {
+            "deeplabv3": {
+                "f1": 0.7797788891579043,
+                "dice": 0.7189424756229712,
+                "iou": 0.5836728736848089
+            },
+            "unet": {
+                "f1": 0.822164792137137,
+                "dice": 0.7820194493397892,
+                "iou": 0.6693896281233238
+            }
+        },
+        "Masonry": {
+            "maskrcnn": {
+                "mask_AP": 0.5790952700590766,
+                "box_AP": 0.5893992182459133
+            }
+        }
+    },
+    "dataset_sizes": {
+        "Masonry": "1000",
+        "CrackSeg9k": "7332",
+        "DeepCrack": "300"
+    },
+    "last_metric": {
+        "Masonry": "mask_AP",
+        "CrackSeg9k": "f1",
+        "DeepCrack": "f1"
+    }
+}

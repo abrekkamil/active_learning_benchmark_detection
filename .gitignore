@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# Environments
+venv/
+env/
+.venv/
+MedCAL/
+
+# Logs and results
+runs/
+outputs/
+results/
+wandb/
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+
+# Datasets
+Datasets/
+datasets/
+data/
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# System
+.DS_Store

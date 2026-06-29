@@ -1,0 +1,53 @@
+experiment_name: "structdamage_classification"
+
+# =====================
+# Dataset
+# =====================
+dataset: "StructDamage"
+dataset_type: "structdamage"
+data_dir: "/home3/vzcl68/datasets/StructDamage/extracted"   # update after extraction
+num_classes: 0                 # auto-detected from folders
+img_size: 224
+scale_size: 224
+label_mode: "folder"
+val_fraction: 0.15             # used only if there is no val/valid/test folder
+pool_fraction: 0.0
+
+# =====================
+# Task / Model
+# =====================
+task: "classification"
+model_name: "resnet50_classification"
+pretrained: true
+
+# =====================
+# Active Learning
+# =====================
+initial_labeled: 0.05
+query_size: 1000
+al_cycles: 10
+epochs_per_cycle: 10
+initial_training_epoch: 15
+skip_cold_start: false
+cold_start_strategy: "random"
+query_strategy: "uncertainty"
+pool: false
+
+# =====================
+# Training
+# =====================
+use_cuda: true
+batch_size: 32
+lr: 0.0001
+weight_decay: 0.0001
+num_workers: 4
+
+# =====================
+# Logging
+# =====================
+seed: 42
+use_wandb: false
+wandb_project: "AL_benchmark"
+print_freq: 100
+checkpoint_dir: "results/checkpoints/structdamage"
+results_dir: "results/structdamage"

@@ -1,0 +1,62 @@
+
+experiment_name: "RAL_SDNET2018"
+
+dataset: "SDNET2018"
+dataset_type: "sdnet2018"
+data_dir: "/home3/vzcl68/Datasets/SDNET2018"
+
+num_classes: 2
+img_size: 224
+scale_size: 224
+label_mode: "sdnet_binary"
+val_fraction: 0.15
+pool_fraction: 0.0
+
+task: "binary_classification"
+model_name: "resnet50_classification"
+pretrained: true
+
+# Active learning setup
+initial_labeled: 0.05
+query_size: 1000
+al_cycles: 10
+initial_training_epoch: 15
+epochs_per_cycle: 10
+
+skip_cold_start: false
+cold_start_strategy: "random"
+query_strategy: "rl_policy"
+pool: false
+
+# RL setup
+use_rl: true
+oracle_epochs: 25
+
+policy_lr: 0.0003
+policy_hidden: 256
+entropy_beta: 0.005
+policy_temp: 1.0
+policy_temp_start: 1.5
+policy_temp_end: 0.7
+candidate_ratio: 0.4
+
+dynamic_query_size: false
+budget_options: [250, 500, 1000]
+cost_lambda: 0.001
+
+# Training
+use_cuda: true
+batch_size: 32
+lr: 0.0001
+weight_decay: 0.0001
+num_workers: 4
+
+# Logging
+seed: 42
+use_wandb: false
+wandb_project: "RAL_benchmark"
+print_freq: 100
+
+
+checkpoint_dir: "results/checkpoints"
+results_dir: "../results/"

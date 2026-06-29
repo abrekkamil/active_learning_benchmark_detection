@@ -1,0 +1,34 @@
+# experiments/configs/rl_active_learning.yaml
+dataset: "DeepCrack"
+dataset_type: "deepcrack"
+data_dir: "/home3/vzcl68/Datasets/DeepCrack/"
+dataset_name: "al_experiment"
+num_classes: 2  # Including background
+img_size: 256
+
+task: segmentation
+num_classes: 2
+
+seed: 42
+use_cuda: true
+
+initial_labeled: 45
+skip_cold_start: true
+
+use_rl: true
+cold_start_strategy: simple_diversity
+query_strategy: rl_policy
+
+al_cycles: 5
+al_budget: 5
+
+oracle_epochs: 5
+cycle_epochs: 10
+
+policy_lr: 0.0001
+policy_hidden: 256
+entropy_beta: 0.01
+
+lr: 0.001
+batch_size: 8
+results_dir: ./results/rl_active_learning/
