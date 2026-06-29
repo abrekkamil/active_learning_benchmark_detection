@@ -249,13 +249,40 @@ class ActiveLearningSystemRL:
         return f"{source}_{idx}"   
 
     def forward_model(self, images):
-        try:
-            # HuggingFace-style (SegFormer)
-            return self.oracle_model.model(pixel_values=images)
-        except TypeError:
-            # Torchvision / U-Net style
+        """
+        Forward pass for oracle model.
+
+        Detection models such as Faster R-CNN require:
+            images = list[Tensor[C, H, W]]
+        and every tensor must be on the same device as the model.
+        """
+
+        if self.config.task in ["detection", "instance_segmentation"]:
+
+            if torch.is_tensor(images):
+                if images.dim() == 3:
+                    images = [_ensure_rgb(images).to(self.device)]
+                elif images.dim() == 4:
+                    images = [_ensure_rgb(img).to(self.device) for img in images]
+                else:
+                    raise ValueError(f"Unexpected detection image tensor shape: {images.shape}")
+
+            else:
+                images = [_ensure_rgb(img).to(self.device) for img in images]
+
             return self.oracle_model.model(images)
 
+        try:
+            # HuggingFace-style, for example SegFormer
+            return self.oracle_model.model(pixel_values=images)
+
+        except TypeError:
+            # Torchvision / U-Net / classification style
+            if torch.is_tensor(images):
+                images = images.to(self.device)
+
+            return self.oracle_model.model(images)
+        
     def _compute_state(self, images: torch.Tensor):
 
         with torch.no_grad():
@@ -408,15 +435,14 @@ class ActiveLearningSystemRL:
 
             for images, _ in loader:
 
-                images = [_ensure_rgb(img) for img in images]
-                if self.config.task == "detection":
+                if self.config.task in ["detection", "instance_segmentation"]:
+                    images = [_ensure_rgb(img).to(self.device) for img in images]
                     states.append(self._compute_state(images))
+
                 else:
+                    images = [_ensure_rgb(img) for img in images]
                     images = torch.stack(images).to(self.device)
-
                     states.append(self._compute_state(images))
-
-        states = torch.cat(states, dim=0).detach()
 
         # ==========================================================
         # Candidate Filtering
