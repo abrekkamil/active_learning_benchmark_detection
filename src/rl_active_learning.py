@@ -6,7 +6,7 @@ import datetime
 from typing import List, Dict, Tuple, Optional
 import os
 import json
-
+from tqdm import tqdm
 from torch.utils.data import DataLoader, Subset
 
 from .models import UNetModel, PolicyNet
@@ -433,7 +433,7 @@ class ActiveLearningSystemRL:
 
         with torch.no_grad():
 
-            for images, _ in loader:
+            for images, _ in tqdm(loader, desc="Computing RL states", leave=False):
 
                 if self.config.task in ["detection", "instance_segmentation"]:
                     images = [_ensure_rgb(img).to(self.device) for img in images]
