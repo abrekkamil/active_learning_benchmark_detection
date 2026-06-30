@@ -66,11 +66,16 @@ class ActiveLearningSystemRL:
         # --------------------
         # Datasets
         # --------------------
+        self.logger.info("Loading train dataset...")
         self.dataset_train = load_dataset(config, split="train")
+        self.logger.info(f"Loaded train dataset: {len(self.dataset_train)} samples")
         self.dataset_val   = load_dataset(config, split="val")
+        self.logger.info(f"Loaded val dataset: {len(self.dataset_val)} samples")
         self.dataset_pool = None
         if config.pool:
+            self.logger.info("Loading pool dataset...")
             self.dataset_pool = load_dataset(config, split="pool")
+            self.logger.info(f"Loaded pool dataset: {len(self.dataset_pool)} samples")
 
         if hasattr(self.dataset_train, "num_classes"):
             self.config.num_classes = int(self.dataset_train.num_classes)
@@ -162,7 +167,9 @@ class ActiveLearningSystemRL:
             )
 
             cold_start = ColdStartStrategies(self.dataset_train, config)
-
+            self.logger.info(
+                f"Applying cold start strategy={config.cold_start_strategy}, n_init={n_init}"
+            )
             labeled_train = cold_start.apply(
                 strategy_name=config.cold_start_strategy,
                 n_samples=n_init,
