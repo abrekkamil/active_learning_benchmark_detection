@@ -415,33 +415,90 @@ class ActiveLearningSystem:
         # ---------------------------------
         elif self.config.task in ["instance_segmentation", "detection"]:
 
-            mask_ap = eval_metrics.get("mask_AP", 0)
-            bbox_ap = eval_metrics.get("bbox_AP", 0)
+            bbox_ap = eval_metrics.get("bbox_AP", eval_metrics.get("bbox_mAP50_95", 0))
+            bbox_ap50 = eval_metrics.get("bbox_AP50", eval_metrics.get("bbox_mAP50", 0))
 
-            self.history.setdefault("val_mask_AP", []).append(mask_ap)
+            # Keep old key so old graph/explorer code does not break
             self.history.setdefault("val_bbox_AP", []).append(bbox_ap)
 
-            self.logger.info(
+            # Clearer names for future plots
+            self.history.setdefault("val_bbox_AP50", []).append(bbox_ap50)
+            self.history.setdefault("val_bbox_AP50_95", []).append(bbox_ap)
+
+            # Only meaningful for Mask R-CNN / instance segmentation
+            if self.config.task == "instance_segmentation":
+                mask_ap = eval_metrics.get("mask_AP", 0)
+                self.history.setdefault("val_mask_AP", []).append(mask_ap)
+            else:
+                mask_ap = None
+                # Optional: keep old key to avoid explorer errors
+                self.history.setdefault("val_mask_AP", []).append(0.0)
+
+            # Optional per-class detection metrics
+            per_class = eval_metrics.get("per_class", {})
+
+            for class_name, class_metrics in per_class.items():
+                safe_name = (
+                    class_name
+                    .replace(" ", "_")
+                    .replace("/", "_")
+                    .replace("-", "_")
+                )
+
+                ap50 = class_metrics.get("AP50", 0)
+                ap5095 = class_metrics.get("AP50_95", class_metrics.get("AP", 0))
+
+                self.history.setdefault(
+                    f"val_class_{safe_name}_AP50", []
+                ).append(ap50)
+
+                self.history.setdefault(
+                    f"val_class_{safe_name}_AP50_95", []
+                ).append(ap5095)
+
+            msg = (
                 f"Epoch {epoch+1} | "
-                f"Loss: {train_metrics.get('train_loss',0):.4f} | "
-                f"Mask AP: {mask_ap:.4f} | "
-                f"BBox AP: {bbox_ap:.4f} | "
+                f"Loss: {train_metrics['train_loss']:.4f} | "
+                f"BBox AP50: {bbox_ap50:.4f} | "
+                f"BBox AP50-95: {bbox_ap:.4f} | "
                 f"Labeled: {len(self.labeled_indices)}"
             )
 
+            if mask_ap is not None:
+                msg += f" | Mask AP: {mask_ap:.4f}"
+
+            self.logger.info(msg)
+
             if self.config.use_wandb:
-                log_to_wandb(
-                    {
-                        "epoch": epoch + 1,
-                        "global_epoch": global_epoch,
-                        "cycle": self.cycle,
-                        "train_loss": train_metrics.get("train_loss",0),
-                        "val_mask_AP": mask_ap,
-                        "val_bbox_AP": bbox_ap,
-                        "labeled_count": len(self.labeled_indices),
-                    },
-                    step=global_epoch,
-                )
+                wandb_log = {
+                    "epoch": epoch + 1,
+                    "global_epoch": global_epoch,
+                    "cycle": self.cycle,
+                    "train_loss": train_metrics["train_loss"],
+                    "val_bbox_AP": bbox_ap,
+                    "val_bbox_AP50": bbox_ap50,
+                    "val_bbox_AP50_95": bbox_ap,
+                    "labeled_count": len(self.labeled_indices),
+                }
+
+                if mask_ap is not None:
+                    wandb_log["val_mask_AP"] = mask_ap
+
+                for class_name, class_metrics in per_class.items():
+                    safe_name = (
+                        class_name
+                        .replace(" ", "_")
+                        .replace("/", "_")
+                        .replace("-", "_")
+                    )
+
+                    wandb_log[f"val_class_{safe_name}_AP50"] = class_metrics.get("AP50", 0)
+                    wandb_log[f"val_class_{safe_name}_AP50_95"] = class_metrics.get(
+                        "AP50_95",
+                        class_metrics.get("AP", 0)
+                    )
+
+                log_to_wandb(wandb_log, step=global_epoch)
 
         # ---------------------------------
         # Multi-label classification

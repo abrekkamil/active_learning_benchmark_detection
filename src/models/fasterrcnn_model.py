@@ -60,7 +60,7 @@ class FasterRCNNModel(BaseModel):
             weight_decay=getattr(config, "weight_decay", 0.0005),
         )
 
-        
+
     def get_bottleneck_features(self, images):
         """
         Return one feature vector per image for RL state construction.
@@ -244,11 +244,22 @@ class FasterRCNNModel(BaseModel):
                     )
 
         if len(results) == 0:
+            coco_gt = dataset.coco
+            cat_ids = coco_gt.getCatIds()
+            per_class = {
+                coco_gt.cats[cat_id].get("name", str(cat_id)): {
+                    "AP50": 0.0,
+                    "AP50_95": 0.0,
+                }
+                for cat_id in cat_ids
+            }
+
             return {
                 "bbox_AP": 0.0,
                 "bbox_AP50": 0.0,
                 "bbox_AP75": 0.0,
                 "mask_AP": 0.0,
+                "per_class": per_class,
             }
 
         coco_gt = dataset.coco
@@ -258,13 +269,66 @@ class FasterRCNNModel(BaseModel):
         coco_eval.evaluate()
         coco_eval.accumulate()
         coco_eval.summarize()
+        cat_ids = coco_eval.params.catIds
+        class_names = [
+            coco_gt.cats[cat_id].get("name", str(cat_id))
+            for cat_id in cat_ids
+        ]
+
+        per_class = self.summarize_coco_per_class(coco_eval, class_names)
 
         return {
             "bbox_AP": float(coco_eval.stats[0]),
             "bbox_AP50": float(coco_eval.stats[1]),
             "bbox_AP75": float(coco_eval.stats[2]),
             "mask_AP": 0.0,
+            "per_class": per_class,
         }
+
+    def summarize_coco_per_class(self, coco_eval, class_names):
+        """
+        Extract per-class AP50 and AP50-95 from COCOeval.
+
+        COCOeval precision shape:
+            [iou_thresholds, recall_thresholds, classes, area_ranges, max_dets]
+        """
+
+        precisions = coco_eval.eval["precision"]
+
+        # precision: [T, R, K, A, M]
+        # T = IoU thresholds
+        # R = recall thresholds
+        # K = classes
+        # A = area range, 0 is usually "all"
+        # M = max detections, -1 is usually maxDets[-1]
+
+        per_class = {}
+
+        for class_idx, class_name in enumerate(class_names):
+            precision_all = precisions[:, :, class_idx, 0, -1]
+
+            valid = precision_all[precision_all > -1]
+
+            if valid.size == 0:
+                ap_5095 = 0.0
+            else:
+                ap_5095 = float(valid.mean())
+
+            # IoU threshold 0.50 is index 0 in standard COCOeval
+            precision_50 = precisions[0, :, class_idx, 0, -1]
+            valid_50 = precision_50[precision_50 > -1]
+
+            if valid_50.size == 0:
+                ap50 = 0.0
+            else:
+                ap50 = float(valid_50.mean())
+
+            per_class[class_name] = {
+                "AP50": ap50,
+                "AP50_95": ap_5095,
+            }
+
+        return per_class
 
     def predict(self, images: List[torch.Tensor]) -> List[Dict[str, torch.Tensor]]:
         self.model.eval()
