@@ -19,6 +19,9 @@ from .models.utils import _ensure_rgb
 
 import wandb
 
+def log_to_wandb(metrics, step=None):
+    wandb.log(metrics, step=step)
+
 class MixedDataset(torch.utils.data.Dataset):
 
     def __init__(self, dataset_train, dataset_pool, samples):
@@ -98,22 +101,32 @@ class ActiveLearningSystemRL:
         sample_img, _ = unpack_sample(self.dataset_train[0])
         sample_img = _ensure_rgb(sample_img).to(self.device)
 
-        if self.config.task == "detection":
+        if self.config.task in ["detection", "instance_segmentation"]:
             sample_input = [sample_img]
         else:
             sample_input = sample_img.unsqueeze(0)
 
         with torch.no_grad():
             feat = self.oracle_model.model.get_bottleneck_features(sample_input)
-
+        feat = self._ensure_2d_tensor(feat, name="sample bottleneck features")
         bottleneck_dim = feat.shape[1]
 
         self.state_dim = bottleneck_dim + 3  # +3 for uncertainty features
+        budget_options = getattr(
+            self.config,
+            "budget_options",
+            [getattr(self.config, "query_size", 1)]
+        )
+
+        self.config.budget_options = budget_options
+
         self.policy = PolicyNet(
             self.state_dim,
             hidden_dim=self.config.policy_hidden,
-            num_budget_options=len(self.config.budget_options),
+            num_budget_options=len(budget_options),
         ).to(self.device)
+
+
         self.policy_optimizer = torch.optim.Adam(
             self.policy.parameters(),
             lr=getattr(config, "policy_lr", 1e-4),
@@ -282,19 +295,93 @@ class ActiveLearningSystemRL:
                 images = images.to(self.device)
 
             return self.oracle_model.model(images)
-        
-    def _compute_state(self, images: torch.Tensor):
+
+    def _ensure_2d_tensor(self, x, name="tensor"):
+        """
+        Convert model features/logits to a 2D tensor [B, D].
+        This prevents crashes when bottleneck features come as:
+        [D]
+        [B, D]
+        [B, C, H, W]
+        list of tensors
+        """
+        if isinstance(x, (list, tuple)):
+            xs = []
+
+            for item in x:
+                if not torch.is_tensor(item):
+                    item = torch.as_tensor(item, dtype=torch.float32, device=self.device)
+                else:
+                    item = item.to(self.device, dtype=torch.float32)
+
+                if item.ndim == 1:
+                    item = item.unsqueeze(0)
+                elif item.ndim > 2:
+                    item = item.flatten(start_dim=1)
+
+                xs.append(item)
+
+            x = torch.cat(xs, dim=0)
+
+        else:
+            if not torch.is_tensor(x):
+                x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
+            else:
+                x = x.to(self.device, dtype=torch.float32)
+
+            if x.ndim == 1:
+                x = x.unsqueeze(0)
+            elif x.ndim > 2:
+                x = x.flatten(start_dim=1)
+
+        if x.ndim != 2:
+            raise ValueError(f"{name} should be 2D [B, D], got shape {tuple(x.shape)}")
+
+        return x
+
+
+    def _extract_logits(self, outputs):
+        """
+        Robustly extract logits from different model output formats.
+        Works for:
+        tensor
+        dict with 'out'
+        dict with 'logits'
+        HuggingFace-style output.logits
+        tuple/list whose first item is logits
+        """
+        if isinstance(outputs, dict):
+            if "out" in outputs:
+                return outputs["out"]
+            if "logits" in outputs:
+                return outputs["logits"]
+            raise ValueError(f"Could not find logits in output dict keys: {outputs.keys()}")
+
+        if hasattr(outputs, "logits"):
+            return outputs.logits
+
+        if torch.is_tensor(outputs):
+            return outputs
+
+        if isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+            if torch.is_tensor(outputs[0]):
+                return outputs[0]
+
+        raise ValueError(f"Unknown model output format: {type(outputs)}")
+
+    def _compute_state(self, images):
 
         with torch.no_grad():
 
             feats = self.oracle_model.model.get_bottleneck_features(images).detach()
+            feats = self._ensure_2d_tensor(feats, name="bottleneck features")
 
             outputs = self.forward_model(images)
 
-            # =========================
-            # INSTANCE SEGMENTATION
-            # =========================
-            if self.config.task in ["instance_segmentation", "detection"]:
+            # ======================================================
+            # DETECTION / INSTANCE SEGMENTATION
+            # ======================================================
+            if self.config.task in ["detection", "instance_segmentation"]:
 
                 entropy_list = []
                 confidence_list = []
@@ -304,30 +391,23 @@ class ActiveLearningSystemRL:
 
                     scores = out.get("scores", torch.empty(0, device=self.device))
 
-                    # No detections means the model is unsure / weak.
-                    # Give it high uncertainty so these images can still be queried.
                     if scores.numel() == 0:
                         entropy_list.append(torch.tensor(1.0, device=self.device))
                         confidence_list.append(torch.tensor(0.0, device=self.device))
                         margin_list.append(torch.tensor(0.0, device=self.device))
                         continue
 
-                    scores = scores.clamp(1e-6, 1.0 - 1e-6)
+                    scores = scores.to(self.device).clamp(1e-6, 1.0 - 1e-6)
 
-                    # Binary entropy over detection confidence scores.
-                    # Higher = more uncertain.
                     entropy = -(
                         scores * torch.log(scores)
                         + (1.0 - scores) * torch.log(1.0 - scores)
                     ).mean()
 
-                    # Normalize roughly to [0, 1]
                     entropy = entropy / np.log(2.0)
 
-                    # Highest detection confidence.
                     confidence = scores.max()
 
-                    # Margin between top-2 detection scores.
                     if scores.numel() > 1:
                         top2 = torch.topk(scores, k=2).values
                         margin = top2[0] - top2[1]
@@ -342,68 +422,148 @@ class ActiveLearningSystemRL:
                 confidence = torch.stack(confidence_list)
                 margin = torch.stack(margin_list)
 
-
+            # ======================================================
+            # MULTILABEL CLASSIFICATION
+            # ======================================================
             elif self.config.task == "multilabel_classification":
- 
-                # outputs is [B, num_classes] raw logits
-                logits = outputs
-                probs  = torch.sigmoid(logits)             # [B, C]  independent
- 
-                # Mean binary entropy across all labels → [B]
-                eps = 1e-8
-                entropy    = -(probs * torch.log(probs + eps)
-                               + (1 - probs) * torch.log(1 - probs + eps)).mean(dim=1)
- 
-                # Mean confidence = mean of max(p, 1-p) across classes → [B]
-                confidence = torch.max(probs, 1 - probs).values.mean(dim=1)
- 
-                # Margin = distance from 0.5, averaged across classes → [B]
-                margin = (probs - 0.5).abs().mean(dim=1)
 
-            elif self.config.task in ["classification", "multiclass_classification", "binary_classification"]:
+                logits = self._extract_logits(outputs)
 
-                # outputs is [B, num_classes] raw logits
-                logits = outputs
-                probs = F.softmax(logits, dim=1)
+                if logits.ndim == 1:
+                    logits = logits.unsqueeze(0)
+
+                probs = torch.sigmoid(logits)
                 eps = 1e-8
 
-                entropy = -(probs * torch.log(probs + eps)).sum(dim=1)
-                confidence = probs.max(dim=1).values
-                top2 = torch.topk(probs, k=min(2, probs.shape[1]), dim=1).values
-                if top2.shape[1] == 1:
-                    margin = top2[:, 0]
+                entropy = -(
+                    probs * torch.log(probs + eps)
+                    + (1.0 - probs) * torch.log(1.0 - probs + eps)
+                ).mean(dim=1)
+
+                entropy = entropy / np.log(2.0)
+
+                confidence = torch.max(probs, 1.0 - probs).mean(dim=1)
+                margin = torch.abs(probs - 0.5).mul(2.0).mean(dim=1)
+
+            # ======================================================
+            # SINGLE-LABEL CLASSIFICATION
+            # ======================================================
+            elif self.config.task in [
+                "classification",
+                "multiclass_classification",
+                "binary_classification",
+            ]:
+
+                logits = self._extract_logits(outputs)
+
+                # Binary model with one logit: [B] or [B, 1]
+                if logits.ndim == 1 or logits.shape[1] == 1:
+                    logits = logits.reshape(-1)
+                    probs_pos = torch.sigmoid(logits).clamp(1e-8, 1.0 - 1e-8)
+
+                    entropy = -(
+                        probs_pos * torch.log(probs_pos)
+                        + (1.0 - probs_pos) * torch.log(1.0 - probs_pos)
+                    )
+
+                    entropy = entropy / np.log(2.0)
+
+                    confidence = torch.max(probs_pos, 1.0 - probs_pos)
+                    margin = torch.abs(probs_pos - 0.5).mul(2.0)
+
+                # Multiclass or binary with two logits: [B, C]
                 else:
-                    margin = top2[:, 0] - top2[:, 1]
+                    probs = F.softmax(logits, dim=1).clamp(1e-8, 1.0)
+                    num_classes = probs.shape[1]
 
-                
-            # =========================
+                    entropy = -(probs * torch.log(probs)).sum(dim=1)
+
+                    if num_classes > 1:
+                        entropy = entropy / np.log(float(num_classes))
+
+                    confidence = probs.max(dim=1).values
+
+                    top2 = torch.topk(probs, k=min(2, num_classes), dim=1).values
+
+                    if top2.shape[1] == 1:
+                        margin = top2[:, 0]
+                    else:
+                        margin = top2[:, 0] - top2[:, 1]
+
+            # ======================================================
             # SEMANTIC SEGMENTATION
-            # =========================
-            else:
-                if isinstance(outputs, dict):
-                    logits = outputs["out"]
-                elif hasattr(outputs, "logits"):
-                    logits = outputs.logits
-                elif isinstance(outputs, torch.Tensor):
-                    logits = outputs
+            # ======================================================
+            elif self.config.task == "segmentation":
+
+                logits = self._extract_logits(outputs)
+
+                if logits.ndim != 4:
+                    raise ValueError(
+                        f"Segmentation logits should be [B, C, H, W], "
+                        f"got shape {tuple(logits.shape)}"
+                    )
+
+                # Binary segmentation with one output channel: [B, 1, H, W]
+                if logits.shape[1] == 1:
+                    probs_pos = torch.sigmoid(logits[:, 0]).clamp(1e-8, 1.0 - 1e-8)
+
+                    entropy = -(
+                        probs_pos * torch.log(probs_pos)
+                        + (1.0 - probs_pos) * torch.log(1.0 - probs_pos)
+                    ).mean(dim=[1, 2])
+
+                    entropy = entropy / np.log(2.0)
+
+                    confidence = torch.max(probs_pos, 1.0 - probs_pos).mean(dim=[1, 2])
+                    margin = torch.abs(probs_pos - 0.5).mul(2.0).mean(dim=[1, 2])
+
+                # Multiclass segmentation: [B, C, H, W]
                 else:
-                    raise ValueError(f"Unknown model output format: {type(outputs)}")
-                
-                probs = F.softmax(logits, dim=1)
+                    probs = F.softmax(logits, dim=1).clamp(1e-8, 1.0)
+                    num_classes = probs.shape[1]
 
-                entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=1).mean(dim=[1,2])
+                    entropy = -(probs * torch.log(probs)).sum(dim=1).mean(dim=[1, 2])
 
-                confidence = probs.max(dim=1).values.mean(dim=[1,2])
+                    if num_classes > 1:
+                        entropy = entropy / np.log(float(num_classes))
 
-                margin = torch.topk(probs, 2, dim=1).values
-                margin = (margin[:,0] - margin[:,1]).mean(dim=[1,2])
+                    confidence = probs.max(dim=1).values.mean(dim=[1, 2])
+
+                    top2 = torch.topk(probs, k=min(2, num_classes), dim=1).values
+
+                    if top2.shape[1] == 1:
+                        margin = top2[:, 0].mean(dim=[1, 2])
+                    else:
+                        margin = (top2[:, 0] - top2[:, 1]).mean(dim=[1, 2])
+
+            else:
+                raise ValueError(f"Unsupported task type: {self.config.task}")
 
             uncertainty = torch.stack(
-                [entropy, 1.0 - confidence, 1.0 - margin],
-                dim=1
+                [
+                    entropy,
+                    1.0 - confidence,
+                    1.0 - margin,
+                ],
+                dim=1,
             )
 
-            return torch.cat([feats, uncertainty], dim=1)
+            if uncertainty.shape[0] != feats.shape[0]:
+                raise ValueError(
+                    f"Feature/uncertainty batch mismatch: "
+                    f"features={feats.shape}, uncertainty={uncertainty.shape}"
+                )
+
+            state = torch.cat([feats, uncertainty], dim=1)
+
+            if state.shape[1] != self.state_dim:
+                raise ValueError(
+                    f"State dimension mismatch inside _compute_state: "
+                    f"got {state.shape[1]}, expected {self.state_dim}"
+                )
+
+            return state
+
     # ==========================================================
     # RL query step
     # ==========================================================
@@ -429,7 +589,12 @@ class ActiveLearningSystemRL:
             collate_fn=universal_collate
         )
 
-        states = []
+        state_batches = []
+
+        # ==========================================================
+        # Compute RL states
+        # ==========================================================
+        self.oracle_model.eval()
 
         with torch.no_grad():
 
@@ -437,12 +602,65 @@ class ActiveLearningSystemRL:
 
                 if self.config.task in ["detection", "instance_segmentation"]:
                     images = [_ensure_rgb(img).to(self.device) for img in images]
-                    states.append(self._compute_state(images))
+                    batch_states = self._compute_state(images)
 
                 else:
                     images = [_ensure_rgb(img) for img in images]
                     images = torch.stack(images).to(self.device)
-                    states.append(self._compute_state(images))
+                    batch_states = self._compute_state(images)
+
+                # --------------------------------------------------
+                # Make every batch state safely [B, state_dim]
+                # --------------------------------------------------
+                if not torch.is_tensor(batch_states):
+                    batch_states = torch.as_tensor(
+                        batch_states,
+                        dtype=torch.float32,
+                        device=self.device
+                    )
+                else:
+                    batch_states = batch_states.detach().to(
+                        device=self.device,
+                        dtype=torch.float32
+                    )
+
+                if batch_states.ndim == 1:
+                    batch_states = batch_states.unsqueeze(0)
+
+                if batch_states.ndim != 2:
+                    raise ValueError(
+                        f"Expected batch_states to be 2D [B, state_dim], "
+                        f"got shape {tuple(batch_states.shape)}"
+                    )
+
+                state_batches.append(batch_states)
+
+        if len(state_batches) == 0:
+            return [], None, None, None
+
+        states = torch.cat(state_batches, dim=0)
+
+        if states.ndim != 2:
+            raise ValueError(
+                f"Expected states to be 2D [N, state_dim], "
+                f"got shape {tuple(states.shape)}"
+            )
+
+        if states.shape[1] != self.state_dim:
+            raise ValueError(
+                f"State dimension mismatch: got {states.shape[1]}, "
+                f"expected {self.state_dim}"
+            )
+
+        if states.shape[0] != len(self.unlabeled_indices):
+            raise ValueError(
+                f"Number of states does not match unlabeled pool: "
+                f"states={states.shape[0]}, "
+                f"unlabeled={len(self.unlabeled_indices)}. "
+                f"This means _compute_state() is not returning one state per image."
+            )
+
+        self.logger.info(f"RL states shape: {tuple(states.shape)}")
 
         # ==========================================================
         # Candidate Filtering
@@ -451,47 +669,98 @@ class ActiveLearningSystemRL:
 
         candidate_ratio = getattr(self.config, "candidate_ratio", 0.2)
         top_k = int(candidate_ratio * len(entropy_scores))
+
         if getattr(self.config, "dynamic_query_size", False):
-            max_budget = max([int(b) for b in getattr(self.config, "budget_options", [self.config.query_size])])
+            budget_options = getattr(
+                self.config,
+                "budget_options",
+                [getattr(self.config, "query_size", 1)]
+            )
+            budget_options = [max(1, int(float(b))) for b in budget_options]
+            max_budget = max(budget_options)
             top_k = max(top_k, max_budget)
+
         else:
-            top_k = max(top_k, int(self.config.query_size) if self.config.query_size > 1 else 1)
+            query_size = getattr(self.config, "query_size", 1)
+
+            if query_size <= 1:
+                min_query = max(1, int(query_size * self.total_samples))
+            else:
+                min_query = int(query_size)
+
+            top_k = max(top_k, min_query)
 
         top_k = max(1, min(top_k, len(entropy_scores)))
 
-        _, candidate_idx = torch.topk(entropy_scores, top_k)
+        _, candidate_idx = torch.topk(
+            entropy_scores,
+            k=top_k,
+            largest=True,
+            sorted=False
+        )
 
-        candidate_states = states[candidate_idx]
+        candidate_states = states.index_select(0, candidate_idx)
+
+        candidate_idx_list = candidate_idx.detach().cpu().tolist()
 
         candidate_pool = [
-            self.unlabeled_indices[i] for i in candidate_idx.tolist()
+            self.unlabeled_indices[i] for i in candidate_idx_list
         ]
+
+        if len(candidate_pool) == 0:
+            return [], None, None, None
 
         # ==========================================================
         # Policy Forward
         # ==========================================================
         global_state = candidate_states.mean(dim=0)
-        image_logits, budget_logits = self.policy(candidate_states, global_state)
+
+        image_logits, budget_logits = self.policy(
+            candidate_states,
+            global_state
+        )
 
         # ==========================================================
         # Query size
         # ==========================================================
         if getattr(self.config, "dynamic_query_size", False):
 
-            # Dynamic RAL should choose one discrete query size from config.budget_options,
-            # not a free percentage between 1% and 15% of the pool.
-            budget_options = getattr(self.config, "budget_options", [250, 500, 750, 1000])
-            budget_options = [int(b) for b in budget_options]
+            budget_options = getattr(
+                self.config,
+                "budget_options",
+                [250, 500, 750, 1000]
+            )
+            budget_options = [max(1, int(float(b))) for b in budget_options]
 
-            budget_probs = F.softmax(budget_logits / self.policy_temp, dim=0)
+            budget_logits = budget_logits.reshape(-1)
+
+            if budget_logits.numel() != len(budget_options):
+                raise ValueError(
+                    f"Budget logits/options mismatch: "
+                    f"budget_logits={budget_logits.numel()}, "
+                    f"budget_options={len(budget_options)}"
+                )
+
+            budget_probs = F.softmax(
+                budget_logits / self.policy_temp,
+                dim=0
+            )
+
+            budget_probs = torch.nan_to_num(
+                budget_probs,
+                nan=1.0 / budget_probs.numel(),
+                posinf=1.0 / budget_probs.numel(),
+                neginf=0.0
+            )
+
             budget_probs = budget_probs.clamp_min(1e-12)
+            budget_probs = budget_probs / budget_probs.sum()
 
             budget_dist = torch.distributions.Categorical(probs=budget_probs)
             budget_action = budget_dist.sample()
 
             selected_budget_option = budget_options[int(budget_action.item())]
 
-            # Cannot query more samples than available in the candidate pool.
             budget = min(selected_budget_option, len(candidate_pool))
             budget = max(1, int(budget))
 
@@ -506,11 +775,12 @@ class ActiveLearningSystemRL:
 
         else:
 
-            if self.config.query_size <= 1:
-#                 budget = int(self.config.query_size * len(candidate_pool))
-                budget = int(self.config.query_size * self.total_samples)
+            query_size = getattr(self.config, "query_size", 1)
+
+            if query_size <= 1:
+                budget = int(query_size * self.total_samples)
             else:
-                budget = int(self.config.query_size)
+                budget = int(query_size)
 
             budget = max(1, min(budget, len(candidate_pool)))
 
@@ -521,46 +791,71 @@ class ActiveLearningSystemRL:
         # Image Sampling
         # ==========================================================
         budget = int(budget)
+
+        image_logits = image_logits.reshape(-1)
+
+        if image_logits.numel() != len(candidate_pool):
+            raise ValueError(
+                f"Image logits/candidate pool mismatch: "
+                f"image_logits={image_logits.numel()}, "
+                f"candidate_pool={len(candidate_pool)}"
+            )
+
         image_probs = F.softmax(
-            image_logits.squeeze() / self.policy_temp,
+            image_logits / self.policy_temp,
             dim=0
         )
 
+        image_probs = torch.nan_to_num(
+            image_probs,
+            nan=1.0 / image_probs.numel(),
+            posinf=1.0 / image_probs.numel(),
+            neginf=0.0
+        )
+
         image_probs = image_probs.clamp_min(1e-12)
+        image_probs = image_probs / image_probs.sum()
 
         selected_pos = torch.multinomial(
             image_probs,
             num_samples=budget,
-            replacement=False,
+            replacement=False
         )
 
         log_prob_images = torch.log(image_probs[selected_pos]).sum()
-
         log_prob_sum = log_prob_images + log_prob_budget
 
         entropy_images = -(image_probs * torch.log(image_probs)).sum()
-
         entropy = entropy_images + entropy_budget
 
         selected_indices = [
-            candidate_pool[i] for i in selected_pos.tolist()
+            candidate_pool[int(i)] for i in selected_pos.detach().cpu().tolist()
         ]
+
         selected_samples_info = []
 
         for source, idx in selected_indices:
-
             name = self._get_sample_name(source, idx)
 
-            selected_samples_info.append({
-                "source": source,
-                "index": idx,
-                "name": name
-    })
-        self.logger.info(f"Selected {len(selected_indices)} samples with budget {budget}")
+            selected_samples_info.append(
+                {
+                    "source": source,
+                    "index": idx,
+                    "name": name
+                }
+            )
+
+        self.logger.info(
+            f"Selected {len(selected_indices)} samples with budget {budget}"
+        )
+
         self.logger.info(f"Selected samples: {selected_samples_info}")
+
         self.history.setdefault("selected_samples", []).append(selected_samples_info)
-        n_train = sum(1 for s,_ in selected_indices if s == "train")
-        n_pool = sum(1 for s,_ in selected_indices if s == "pool")
+
+        n_train = sum(1 for s, _ in selected_indices if s == "train")
+        n_pool = sum(1 for s, _ in selected_indices if s == "pool")
+
         self.logger.info(
             f"Selected {len(selected_indices)} samples "
             f"({n_train} train, {n_pool} pool)"
@@ -568,6 +863,7 @@ class ActiveLearningSystemRL:
 
         self.history.setdefault("selected_train_count", []).append(n_train)
         self.history.setdefault("selected_pool_count", []).append(n_pool)
+
         return selected_indices, log_prob_sum, entropy, budget
     
     def _maybe_save_best_checkpoint(self, eval_metrics, epoch):
@@ -615,9 +911,12 @@ class ActiveLearningSystemRL:
     # ==========================================================
     def run_cycle(self):
         # Query
+        policy_temp_start = getattr(self.config, "policy_temp_start", self.policy_temp)
+        policy_temp_end = getattr(self.config, "policy_temp_end", self.policy_temp)
+
         self.policy_temp = max(
-        self.config.policy_temp_end,
-        self.config.policy_temp_start * (0.95 ** self.cycle)
+            policy_temp_end,
+            policy_temp_start * (0.95 ** self.cycle)
         )
             
         new_indices, log_prob_sum, entropy, budget = self.query()
@@ -667,16 +966,25 @@ class ActiveLearningSystemRL:
         self.prev_score = score 
         # Cost penalty
         if getattr(self.config, "dynamic_query_size", False):
-            reward = reward - self.config.cost_lambda * (budget / self.total_samples)
+            cost_lambda = getattr(self.config, "cost_lambda", 0.0)
+            reward = reward - cost_lambda * (budget / self.total_samples)
         # Policy update ONLY if a query actually happened
+        advantage_value = 0.0
         advantage = torch.tensor(0.0, device=self.device)
+
         if log_prob_sum is not None:
-            advantage = reward - self.reward_baseline
-            advantage = torch.tensor(advantage, device=self.device)
-            # Policy update
+            advantage_value = float(reward - self.reward_baseline)
+
+            advantage = torch.tensor(
+                advantage_value,
+                dtype=torch.float32,
+                device=self.device
+            )
+
             self.reward_baseline = (
-            self.baseline_momentum * self.reward_baseline
-            + (1 - self.baseline_momentum) * reward)
+                self.baseline_momentum * self.reward_baseline
+                + (1 - self.baseline_momentum) * reward
+            )
 
             loss = -(advantage * log_prob_sum) - self.entropy_beta * entropy
 
@@ -688,8 +996,13 @@ class ActiveLearningSystemRL:
         else:
             self.logger.info("No policy update (no query this cycle)")
 
-        self.logger.info("Reward: {:.4f} | Baseline: {:.4f} | Advantage: {:.4f}".format(
-            reward, self.reward_baseline, advantage))
+        self.logger.info(
+            "Reward: {:.4f} | Baseline: {:.4f} | Advantage: {:.4f}".format(
+                float(reward),
+                float(self.reward_baseline),
+                float(advantage_value)
+            )
+        )
         
         self.cycle += 1
 
