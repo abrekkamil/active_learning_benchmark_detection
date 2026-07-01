@@ -696,9 +696,67 @@ class ActiveLearningSystemRL:
         candidate_ratio = getattr(self.config, "candidate_ratio", 0.2)
         top_k = int(candidate_ratio * len(entropy_scores))
 
+        # If discrete mode is used, make sure candidate pool is at least as large
+        # as the largest possible selected budget.
         if getattr(self.config, "dynamic_query_size", False):
             budget_mode = getattr(self.config, "budget_mode", "discrete").lower()
-        
+
+            if budget_mode == "discrete":
+                budget_options = getattr(
+                    self.config,
+                    "budget_options",
+                    [getattr(self.config, "query_size", 1)]
+                )
+                budget_options = [max(1, int(float(b))) for b in budget_options]
+                top_k = max(top_k, max(budget_options))
+
+        else:
+            query_size = getattr(self.config, "query_size", 1)
+
+            if query_size <= 1:
+                min_query = max(1, int(query_size * self.total_samples))
+            else:
+                min_query = int(query_size)
+
+            top_k = max(top_k, min_query)
+
+        top_k = max(1, min(top_k, len(entropy_scores)))
+
+        _, candidate_idx = torch.topk(
+            entropy_scores,
+            k=top_k,
+            largest=True,
+            sorted=False
+        )
+
+        candidate_states = states.index_select(0, candidate_idx)
+
+        candidate_idx_list = candidate_idx.detach().cpu().tolist()
+
+        candidate_pool = [
+            self.unlabeled_indices[i] for i in candidate_idx_list
+        ]
+
+        if len(candidate_pool) == 0:
+            return [], None, None, None
+
+        # ==========================================================
+        # Policy Forward
+        # ==========================================================
+        global_state = candidate_states.mean(dim=0)
+
+        image_logits, budget_logits = self.policy(
+            candidate_states,
+            global_state
+        )
+
+        # ==========================================================
+        # Query size
+        # ==========================================================
+        if getattr(self.config, "dynamic_query_size", False):
+
+            budget_mode = getattr(self.config, "budget_mode", "discrete").lower()
+
             # ======================================================
             # Continuous / old scalar behaviour
             # ======================================================
@@ -725,7 +783,6 @@ class ActiveLearningSystemRL:
                 budget = int(budget_ratio.item() * len(candidate_pool))
                 budget = max(1, min(budget, len(candidate_pool)))
 
-                # This matches your old code behaviour.
                 log_prob_budget = torch.log(budget_ratio + 1e-12)
 
                 p = budget_ratio
@@ -812,100 +869,6 @@ class ActiveLearningSystemRL:
             query_size = getattr(self.config, "query_size", 1)
 
             if query_size <= 1:
-                min_query = max(1, int(query_size * self.total_samples))
-            else:
-                min_query = int(query_size)
-
-            top_k = max(top_k, min_query)
-
-        top_k = max(1, min(top_k, len(entropy_scores)))
-
-        _, candidate_idx = torch.topk(
-            entropy_scores,
-            k=top_k,
-            largest=True,
-            sorted=False
-        )
-
-        candidate_states = states.index_select(0, candidate_idx)
-
-        candidate_idx_list = candidate_idx.detach().cpu().tolist()
-
-        candidate_pool = [
-            self.unlabeled_indices[i] for i in candidate_idx_list
-        ]
-
-        if len(candidate_pool) == 0:
-            return [], None, None, None
-
-        # ==========================================================
-        # Policy Forward
-        # ==========================================================
-        global_state = candidate_states.mean(dim=0)
-
-        image_logits, budget_logits = self.policy(
-            candidate_states,
-            global_state
-        )
-
-        # ==========================================================
-        # Query size
-        # ==========================================================
-        if getattr(self.config, "dynamic_query_size", False):
-
-            budget_options = getattr(
-                self.config,
-                "budget_options",
-                [250, 500, 750, 1000]
-            )
-            budget_options = [max(1, int(float(b))) for b in budget_options]
-
-            budget_logits = budget_logits.reshape(-1)
-
-            if budget_logits.numel() != len(budget_options):
-                raise ValueError(
-                    f"Budget logits/options mismatch: "
-                    f"budget_logits={budget_logits.numel()}, "
-                    f"budget_options={len(budget_options)}"
-                )
-
-            budget_probs = F.softmax(
-                budget_logits / self.policy_temp,
-                dim=0
-            )
-
-            budget_probs = torch.nan_to_num(
-                budget_probs,
-                nan=1.0 / budget_probs.numel(),
-                posinf=1.0 / budget_probs.numel(),
-                neginf=0.0
-            )
-
-            budget_probs = budget_probs.clamp_min(1e-12)
-            budget_probs = budget_probs / budget_probs.sum()
-
-            budget_dist = torch.distributions.Categorical(probs=budget_probs)
-            budget_action = budget_dist.sample()
-
-            selected_budget_option = budget_options[int(budget_action.item())]
-
-            budget = min(selected_budget_option, len(candidate_pool))
-            budget = max(1, int(budget))
-
-            log_prob_budget = budget_dist.log_prob(budget_action)
-            entropy_budget = budget_dist.entropy()
-
-            self.logger.info(
-                f"Dynamic budget selected: {selected_budget_option} "
-                f"(effective budget after clamp: {budget}) | "
-                f"budget options: {budget_options}"
-            )
-
-        else:
-
-            query_size = getattr(self.config, "query_size", 1)
-
-            if query_size <= 1:
                 budget = int(query_size * self.total_samples)
             else:
                 budget = int(query_size)
@@ -913,8 +876,7 @@ class ActiveLearningSystemRL:
             budget = max(1, min(budget, len(candidate_pool)))
 
             log_prob_budget = torch.tensor(0.0, device=self.device)
-            entropy_budget = torch.tensor(0.0, device=self.device)
-
+            entropy_budget = torch.tensor(0.0, device=self.device)       
         # ==========================================================
         # Image Sampling
         # ==========================================================
