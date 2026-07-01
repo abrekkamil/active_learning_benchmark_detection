@@ -123,12 +123,31 @@ class ActiveLearningSystemRL:
             [getattr(self.config, "query_size", 1)]
         )
 
-        self.config.budget_options = budget_options
+        budget_mode = getattr(self.config, "budget_mode", "discrete").lower()
+
+        if budget_mode == "continuous":
+            num_budget_options = 1
+
+        elif budget_mode == "discrete":
+            budget_options = getattr(
+                self.config,
+                "budget_options",
+                [getattr(self.config, "query_size", 1)]
+            )
+            budget_options = [max(1, int(float(b))) for b in budget_options]
+            self.config.budget_options = budget_options
+            num_budget_options = len(budget_options)
+
+        else:
+            raise ValueError(
+                f"Unknown budget_mode={budget_mode}. "
+                "Use 'discrete' or 'continuous'."
+            )
 
         self.policy = PolicyNet(
             self.state_dim,
             hidden_dim=self.config.policy_hidden,
-            num_budget_options=len(budget_options),
+            num_budget_options=num_budget_options,
         ).to(self.device)
 
 
@@ -678,14 +697,116 @@ class ActiveLearningSystemRL:
         top_k = int(candidate_ratio * len(entropy_scores))
 
         if getattr(self.config, "dynamic_query_size", False):
-            budget_options = getattr(
-                self.config,
-                "budget_options",
-                [getattr(self.config, "query_size", 1)]
-            )
-            budget_options = [max(1, int(float(b))) for b in budget_options]
-            max_budget = max(budget_options)
-            top_k = max(top_k, max_budget)
+            budget_mode = getattr(self.config, "budget_mode", "discrete").lower()
+        
+            # ======================================================
+            # Continuous / old scalar behaviour
+            # ======================================================
+            if budget_mode == "continuous":
+
+                budget_logits = budget_logits.reshape(-1)
+
+                if budget_logits.numel() != 1:
+                    raise ValueError(
+                        f"Continuous budget mode expects 1 budget logit, "
+                        f"but got {budget_logits.numel()}."
+                    )
+
+                budget_ratio_min = getattr(self.config, "budget_ratio_min", 0.01)
+                budget_ratio_max = getattr(self.config, "budget_ratio_max", 0.15)
+
+                budget_ratio = torch.sigmoid(budget_logits[0])
+                budget_ratio = torch.clamp(
+                    budget_ratio,
+                    min=budget_ratio_min,
+                    max=budget_ratio_max
+                )
+
+                budget = int(budget_ratio.item() * len(candidate_pool))
+                budget = max(1, min(budget, len(candidate_pool)))
+
+                # This matches your old code behaviour.
+                log_prob_budget = torch.log(budget_ratio + 1e-12)
+
+                p = budget_ratio
+                entropy_budget = -(
+                    p * torch.log(p + 1e-12)
+                    + (1.0 - p) * torch.log(1.0 - p + 1e-12)
+                )
+
+                self.history.setdefault("selected_budget_ratio", []).append(
+                    float(budget_ratio.detach().cpu().item())
+                )
+
+                self.logger.info(
+                    f"Continuous dynamic budget selected: "
+                    f"ratio={budget_ratio.item():.4f}, "
+                    f"budget={budget}, "
+                    f"candidate_pool={len(candidate_pool)}"
+                )
+
+            # ======================================================
+            # Discrete / new categorical behaviour
+            # ======================================================
+            elif budget_mode == "discrete":
+
+                budget_options = getattr(
+                    self.config,
+                    "budget_options",
+                    [250, 500, 750, 1000]
+                )
+                budget_options = [max(1, int(float(b))) for b in budget_options]
+
+                budget_logits = budget_logits.reshape(-1)
+
+                if budget_logits.numel() != len(budget_options):
+                    raise ValueError(
+                        f"Discrete budget mode mismatch: "
+                        f"budget_logits={budget_logits.numel()}, "
+                        f"budget_options={len(budget_options)}"
+                    )
+
+                budget_probs = F.softmax(
+                    budget_logits / self.policy_temp,
+                    dim=0
+                )
+
+                budget_probs = torch.nan_to_num(
+                    budget_probs,
+                    nan=1.0 / budget_probs.numel(),
+                    posinf=1.0 / budget_probs.numel(),
+                    neginf=0.0
+                )
+
+                budget_probs = budget_probs.clamp_min(1e-12)
+                budget_probs = budget_probs / budget_probs.sum()
+
+                budget_dist = torch.distributions.Categorical(probs=budget_probs)
+                budget_action = budget_dist.sample()
+
+                selected_budget_option = budget_options[int(budget_action.item())]
+
+                budget = min(selected_budget_option, len(candidate_pool))
+                budget = max(1, int(budget))
+
+                log_prob_budget = budget_dist.log_prob(budget_action)
+                entropy_budget = budget_dist.entropy()
+
+                self.history.setdefault("selected_budget_option", []).append(
+                    int(selected_budget_option)
+                )
+
+                self.logger.info(
+                    f"Discrete dynamic budget selected: {selected_budget_option} "
+                    f"(effective budget after clamp: {budget}) | "
+                    f"budget options: {budget_options}"
+                )
+
+            else:
+                raise ValueError(
+                    f"Unknown budget_mode={budget_mode}. "
+                    "Use 'discrete' or 'continuous'."
+                )
 
         else:
             query_size = getattr(self.config, "query_size", 1)
