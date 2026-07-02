@@ -286,6 +286,32 @@ class ActiveLearningSystemRL:
             return dataset.coco.imgs[img_id]["file_name"]
 
         return f"{source}_{idx}"   
+    
+    def _get_cost_denominator(self):
+        """
+        Denominator used for dynamic-query cost penalty.
+
+        cost_denom_mode:
+            total     -> budget / total number of samples
+            unlabeled -> budget / remaining unlabeled pool
+            labeled   -> budget / current labeled set
+        """
+
+        mode = getattr(self.config, "cost_denom_mode", "total")
+
+        if mode == "total":
+            return max(1, int(self.total_samples))
+
+        if mode == "unlabeled":
+            return max(1, len(self.unlabeled_indices))
+
+        if mode == "labeled":
+            return max(1, len(self.labeled_indices))
+
+        raise ValueError(
+            f"Unknown cost_denom_mode: {mode}. "
+            "Use one of: 'total', 'unlabeled', 'labeled'."
+        )
 
     def forward_model(self, images):
         """
@@ -1057,7 +1083,22 @@ class ActiveLearningSystemRL:
         # Cost penalty
         if getattr(self.config, "dynamic_query_size", False):
             cost_lambda = getattr(self.config, "cost_lambda", 0.0)
-            reward = reward - cost_lambda * (budget / self.total_samples)
+            denom = self._get_cost_denominator()
+            cost_penalty = cost_lambda * (budget / denom)
+            reward = reward - cost_penalty
+            
+            self.history.setdefault("selected_budget", []).append(int(budget))
+            self.history.setdefault("cost_penalty", []).append(float(cost_penalty))
+            self.history.setdefault("cost_denom", []).append(int(denom))
+            self.history.setdefault("cost_denom_mode", []).append(
+                getattr(self.config, "cost_denom_mode", "total")
+            )
+
+            self.logger.info(
+                f"Cost penalty: {cost_penalty:.6f} | "
+                f"budget={budget} | denom={denom} | "
+                f"mode={getattr(self.config, 'cost_denom_mode', 'total')}"
+            )
         # Policy update ONLY if a query actually happened
         advantage_value = 0.0
         advantage = torch.tensor(0.0, device=self.device)
